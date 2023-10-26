@@ -1,0 +1,93 @@
+version: '3'
+services:
+  # FastCGI server
+  staging-api:
+    # container_name: staging-api
+    # repo:tag
+    # image: ${CI_REGISTRY_IMAGE}/staging/api:gitlab-ci-api-${CI_PIPELINE_ID}
+    # image: ${CI_PROJECT_PATH_SLUG}:gitlab-ci-api-${CI_PIPELINE_ID}
+    # image: ${PRIVATE_REGISTRY_SERVER}/${PRIVATE_REGISTRY_SERVER_USER}/${CI_PROJECT_PATH_SLUG}/staging-api:gitlab-ci-api-${CI_PIPELINE_ID} 
+    image: ${PREFIX_IMAGE}/staging/api:gitlab-ci-api-${CI_PIPELINE_ID}
+    build:
+      context: .
+      dockerfile: .docker/staging/php/Dockerfile
+      args:
+        - HOST_UID=8320
+        - HOST_GID=8320
+    restart: unless-stopped
+    working_dir: /var/www/backend-php-0823-1
+    volumes:
+      - staging-data-api:/var/www/backend-php-0823-1
+      - staging-data-fe:/var/www/backend-php-0823-1/ui/fe/dist
+      - staging-data-admin:/var/www/backend-php-0823-1/ui/admin/dist
+    networks:
+      - staging-db-net
+      - staging-nginx-net
+    depends_on:
+      - staging-db
+    expose:
+      - 7000
+
+  staging-db:
+    # image: ${CI_REGISTRY_IMAGE}/staging/db:gitlab-ci-api-${CI_PIPELINE_ID}
+    # image: ${CI_PROJECT_PATH_SLUG}:gitlab-ci-db-${CI_PIPELINE_ID}
+    # image: ${PRIVATE_REGISTRY_SERVER}/${PRIVATE_REGISTRY_SERVER_USER}/${CI_PROJECT_PATH_SLUG}/staging-db:gitlab-ci-db-${CI_PIPELINE_ID}
+    image: ${PREFIX_IMAGE}/staging/db:gitlab-ci-db-${CI_PIPELINE_ID}
+    # container_name: staging-db
+    build:
+      context: .docker/staging/mysql
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - staging-data-db:/var/lib/mysql
+    networks:
+      - staging-db-net
+    ports:
+      - ${DB_PORT}:${DB_PORT_PUBLIC}
+
+  staging-server:
+    # image: ${CI_REGISTRY_IMAGE}/staging/server:gitlab-ci-server-${CI_PIPELINE_ID}
+    # image: ${CI_PROJECT_PATH_SLUG}:gitlab-ci-server-${CI_PIPELINE_ID}
+    # image: ${PRIVATE_REGISTRY_SERVER}/${PRIVATE_REGISTRY_SERVER_USER}/${CI_PROJECT_PATH_SLUG}/staging-server:gitlab-ci-server-${CI_PIPELINE_ID} 
+    image: ${PREFIX_IMAGE}/staging/server:gitlab-ci-server-${CI_PIPELINE_ID}
+    # container_name: staging-server
+    build:
+      context: .docker/staging/nginx
+      dockerfile: Dockerfile
+      args:
+        - HOST_UID=8320
+        - HOST_GID=8320
+    working_dir: /var/www/backend-php-0823-1
+    volumes:
+      - staging-data-api:/var/www/backend-php-0823-1
+      - staging-data-fe:/var/www/frontend-react-0823-1
+      - staging-data-admin:/var/www/admin-react-0823-1
+      # Chu y trong gitlab phai chow logs thanh deployer de tranh tu tao moi 1 logs -> root -> khong dong bo
+      # Can co quyen RW -X cho other va G
+      # - ./logs/:/var/log/nginx/ 
+      - staging-data-server:/var/log/nginx
+    networks:
+      - staging-nginx-net
+    ports:
+      - "2096:2096"
+      # - "4000:4000"
+    depends_on:
+      - staging-api
+
+networks:
+  staging-db-net:
+    driver: bridge
+  staging-nginx-net:
+    driver: bridge
+
+volumes:
+  staging-data-db:
+  staging-data-api:
+  staging-data-fe:
+  staging-data-admin:
+  staging-data-server:

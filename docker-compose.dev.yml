@@ -1,0 +1,68 @@
+version: '3'
+services:
+  # FastCGI server
+  api:
+    build:
+      context: .
+      dockerfile: .docker/dev/php/Dockerfile
+      args:
+        - HOST_UID=${HOST_UID}
+        - HOST_GID=${HOST_GID}
+    restart: unless-stopped
+    working_dir: /var/www/backend-php-0823-1
+    volumes:
+      - ./:/var/www/backend-php-0823-1
+    networks:
+      - db-net
+      - nginx-net
+    depends_on:
+      - db
+    expose:
+      - 9000
+
+  db:
+    build:
+      context: .docker/dev/mysql
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - data-db:/var/lib/mysql
+    networks:
+      - db-net
+    ports:
+      - ${DB_PORT}:3306 
+
+  server:
+    build:
+      context: .docker/dev/nginx
+      dockerfile: Dockerfile
+      args:
+        - HOST_UID=${HOST_UID}
+        - HOST_GID=${HOST_GID}
+    working_dir: /var/www/backend-php-0823-1
+    volumes:
+      - ./:/var/www/backend-php-0823-1
+      - ./logs/:/var/log/nginx/ 
+      - ../k082023-1-frontend/dist:/var/www/frontend-react-0823-1
+      - ../k082023-1-admin/dist:/var/www/admin-react-0823-1
+    networks:
+      - nginx-net
+    ports:
+      - "8443:8443"
+    depends_on:
+      - api
+
+networks:
+  db-net:
+    driver: bridge
+  nginx-net:
+    driver: bridge
+
+volumes:
+  data-db:
+      

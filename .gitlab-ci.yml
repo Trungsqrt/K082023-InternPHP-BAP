@@ -1,0 +1,291 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  SSH_PRIVATE_KEY_RUNNER: ${SSH_PRIVATE_KEY_RUNNER}
+  SSH_PRIVATE_KEY_VPS: ${SSH_PRIVATE_KEY_VPS}
+  SSH_KNOWN_HOSTS_VPS: ${SSH_KNOWN_HOSTS_VPS}
+  SSH_PUBLIC_KEY_VPS: ${SSH_PUBLIC_KEY_VPS}
+  CI_PROJECT_NAME: ${CI_PROJECT_NAME}
+
+  REF_SSL_CERT: ${SSL_DEV_CERT}
+  REF_SSL_KEY: ${SSL_DEV_KEY}
+  REF_SSL_CA: ${SSL_CA_CF_CERT}
+  REF_ENV: ${ENV_DEV}
+
+  PREFIX_IMAGE: "${PRIVATE_REGISTRY_SERVER}/${PRIVATE_REGISTRY_SERVER_USER}/${CI_PROJECT_PATH_SLUG}"
+  WORKING_DIR: "/home/${VPS_USER}/${CONTEXT_WORKING_DIR}"
+  SSH_REPO_URL: git@ssh.${CI_SERVER_HOST}:${CI_PROJECT_PATH}.git
+  TARGET_BRANCH: "develop"
+
+deploy-dev:
+  stage: deploy
+  tags:
+    - mock-runner
+  script:
+    - eval $(ssh-agent -s)
+    - echo "${SSH_PRIVATE_KEY_RUNNER}" | sed "s/- /-\n/g; s/ -/\n-/g" | ssh-add -
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_PRIVATE_KEY_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps
+      && chmod 700 ~/.ssh
+      && chmod 600 ~/.ssh/gitlab-vps
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_KNOWN_HOSTS_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/known_hosts
+      && chmod 600 ~/.ssh/known_hosts
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_PUBLIC_KEY_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps.pub 
+      && chmod 600 ~/.ssh/gitlab-vps.pub
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      eval $(ssh-agent -s)
+      && ssh-add ~/.ssh/gitlab-vps
+      && (mkdir -p '${WORKING_DIR}' || true)
+      && cd '${WORKING_DIR}'
+      && (git clone '${SSH_REPO_URL}' || true)
+      && cd '${WORKING_DIR}/${CI_PROJECT_NAME}'
+      && git checkout '${TARGET_BRANCH}'
+      && git fetch > /dev/null
+      && git reset --hard origin/'${TARGET_BRANCH}'
+      && docker compose -f docker-compose.dev.yml down
+      && eval $(ssh-agent -k)
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      cd '${WORKING_DIR}/${CI_PROJECT_NAME}'
+      && (mkdir -p .docker/dev/nginx/ssl || true)
+      && (mkdir -p logs || true)
+      && echo '${REF_SSL_CERT}' | sed "s/- /-\n/g; s/ -/\n-/g"> '.docker/dev/nginx/ssl/cert.pem'
+      && echo '${REF_SSL_KEY}' | sed "s/- /-\n/g; s/ -/\n-/g" > '.docker/dev/nginx/ssl/key.pem'
+      && echo '${REF_SSL_CA}' | sed "s/- /-\n/g; s/ -/\n-/g" > '.docker/dev/nginx/ssl/cloudflare.crt'
+      && cp -f .docker/dev/.dev.env .env
+      && echo "" >> .env
+      && echo '${REF_ENV}' | tr " " "\n" >> .env 
+      && chmod u+x .docker/composer-package-install.sh
+      && chmod u+x .docker/set-info.sh
+      && .docker/composer-package-install.sh
+      && source .docker/set-info.sh
+      && echo HOST_UID: $HOST_UID
+      && echo HOST_GID: $HOST_GID
+      && docker compose -f docker-compose.dev.yml build
+      && docker compose -f docker-compose.dev.yml up -d
+      && sleep 10
+      && docker compose -f docker-compose.dev.yml exec api php artisan migrate --force
+      '
+    - eval $(ssh-agent -k)
+  environment:
+    name: dev-phase
+    url: https://apidev.lamisk.dev:8443
+  only:
+    - develop
+
+build-staging:
+  stage: build
+  image: php:8.2-fpm-alpine
+  tags:
+    - mock-runner
+  variables:
+    REF_SSL_CERT: ${SSL_CERT}
+    REF_SSL_KEY: ${SSL_KEY}
+    REF_SSL_CA: ${SSL_CA_CF_CERT}
+    REF_ENV_STAGING: ${STAGING_ENV}
+    REF_ENV_STAGING_FE: ${ENV_STAGING_FE}
+    PRIVATE_REGISTRY_SERVER: ${PRIVATE_REGISTRY_SERVER}
+    PRIVATE_REGISTRY_SERVER_USER: ${PRIVATE_REGISTRY_SERVER_USER}
+    PRIVATE_REGISTRY_SERVER_PASS: ${PRIVATE_REGISTRY_SERVER_PASS}
+    CI_PROJECT_PATH_SLUG: ${CI_PROJECT_PATH_SLUG}
+    REPO_FE: "git@ssh.gitlab-new.bap.jp:BAPSoftware/division2/training/k082023/k082023-1-frontend.git"
+    REPO_ADMIN: "git@ssh.gitlab-new.bap.jp:BAPSoftware/division2/training/k082023/k082023-1-admin.git"
+    BASE_BUILD_DIR: "${CI_BUILDS_DIR}/${CI_RUNNER_SHORT_TOKEN}/${CI_CONCURRENT_PROJECT_ID}/${CI_PROJECT_PATH}"
+  before_script:
+    - docker run --rm --user "$(id -u):$(id -g)" -v $(pwd):/app -w /app composer:2.6.3 install --ignore-platform-reqs --no-autoloader --no-dev --no-interaction --no-progress --no-suggest --no-scripts --prefer-dist
+    - docker run --rm --user "$(id -u):$(id -g)" -v $(pwd):/app -w /app composer:2.6.3 dump-autoload --classmap-authoritative --no-dev --optimize
+    #   - php artisan key:generate
+    #   - php artisan config:clear
+
+  script:
+    - echo "${REF_ENV_STAGING}" | tr " " "\n" > .env
+    - mkdir -p .docker/staging/nginx/ssl || true
+    - echo "${REF_SSL_CERT}" | sed "s/- /-\n/g; s/ -/\n-/g"  > .docker/staging/nginx/ssl/cert.pem
+    - echo "${REF_SSL_KEY}" | sed "s/- /-\n/g; s/ -/\n-/g" > .docker/staging/nginx/ssl/key.pem
+    - echo "${REF_SSL_CA}" | sed "s/- /-\n/g; s/ -/\n-/g" > '.docker/staging/nginx/ssl/cloudflare.crt'
+    - >
+      echo "${SSH_PRIVATE_KEY_VPS}" | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps
+      && chmod 700 ~/.ssh
+      && chmod 600 ~/.ssh/gitlab-vps
+    - >
+      echo "${SSH_PUBLIC_KEY_VPS}" | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps.pub 
+      && chmod 600 ~/.ssh/gitlab-vps.pub
+    - ssh-keyscan ssh.gitlab-new.bap.jp > /dev/null
+    - echo "test"
+    - echo "${CI_BUILDS_DIR}"
+    - echo "${BASE_BUILD_DIR}"
+    - pwd
+    - mkdir ui || true
+    - >
+      eval $(ssh-agent -s)
+      && ssh-add ~/.ssh/gitlab-vps
+      && (mkdir "${BASE_BUILD_DIR}"/ui/fe || true)
+      && cd "${BASE_BUILD_DIR}"/ui/fe
+      && git init
+      && git remote add origin "${REPO_FE}"
+      && git fetch > /dev/null
+      && git checkout develop
+      && git reset --hard origin/develop
+      && echo "${REF_ENV_STAGING_FE}" | tr " " "\n" > .env
+      && docker run --user "$(id -u):$(id -g)" --rm -v $(pwd):/app -w /app node:18-alpine3.18 yarn install 
+      && docker run --user "$(id -u):$(id -g)" --rm -v $(pwd):/app -w /app node:18-alpine3.18 yarn build
+      && cd "${BASE_BUILD_DIR}"
+      && eval $(ssh-agent -k)
+
+    - >
+      eval $(ssh-agent -s)
+      && ssh-add ~/.ssh/gitlab-vps
+      && (mkdir "${BASE_BUILD_DIR}"/ui/admin || true)
+      && cd "${BASE_BUILD_DIR}"/ui/admin
+      && git init
+      && git remote add origin "${REPO_ADMIN}"
+      && git fetch > /dev/null
+      && git checkout develop
+      && git reset --hard origin/develop
+      && echo "${REF_ENV_STAGING_FE}" | tr " " "\n"  > .env
+      && docker run --user "$(id -u):$(id -g)" --rm -v $(pwd):/app -w /app node:18-alpine3.18 yarn install 
+      && docker run --user "$(id -u):$(id -g)" --rm -v $(pwd):/app -w /app node:18-alpine3.18 yarn build
+      && cd "${BASE_BUILD_DIR}"
+      && eval $(ssh-agent -k)
+
+    - cd "${BASE_BUILD_DIR}"
+
+    - docker compose -f docker-compose.staging.yml build
+    - echo ${PRIVATE_REGISTRY_SERVER_PASS} | docker login ${PRIVATE_REGISTRY_SERVER} -u ${PRIVATE_REGISTRY_SERVER_USER} --password-stdin
+
+    - docker tag "${PREFIX_IMAGE}"/staging/api:gitlab-ci-api-${CI_PIPELINE_ID} ${PREFIX_IMAGE}/staging/api:latest
+    - docker tag "${PREFIX_IMAGE}"/staging/db:gitlab-ci-db-${CI_PIPELINE_ID} ${PREFIX_IMAGE}/staging/db:latest
+    - docker tag "${PREFIX_IMAGE}"/staging/server:gitlab-ci-server-${CI_PIPELINE_ID} ${PREFIX_IMAGE}/staging/server:latest
+
+    - docker push "${PREFIX_IMAGE}"/staging/api:gitlab-ci-api-${CI_PIPELINE_ID}
+    - docker push "${PREFIX_IMAGE}"/staging/db:gitlab-ci-db-${CI_PIPELINE_ID}
+    - docker push "${PREFIX_IMAGE}"/staging/server:gitlab-ci-server-${CI_PIPELINE_ID}
+
+    - docker push "${PREFIX_IMAGE}"/staging/api:latest
+    - docker push "${PREFIX_IMAGE}"/staging/db:latest
+    - docker push "${PREFIX_IMAGE}"/staging/server:latest
+  after_script:
+    - docker logout ${PRIVATE_REGISTRY_SERVER}
+
+  cache:
+    paths:
+      - vendor
+      - ui/fe/node_modules
+      - ui/admin/node_modules
+
+  only:
+    - staging
+  # when: manual
+
+deploy-staging:
+  variables:
+    REF_ENV_STAGING: ${ENV_STAGING}
+  stage: deploy
+  tags:
+    - mock-runner
+  only:
+    - staging
+  # when: manual
+  before_script:
+    - echo ${REF_ENV_STAGING}
+    - eval $(ssh-agent -s)
+    - echo $SSH_AGENT_PID > SSH_AGENT_PID_FILE
+    - echo "${SSH_PRIVATE_KEY_RUNNER}" | ssh-add -
+  after_script:
+    - export SSH_AGENT_PID=$(cat SSH_AGENT_PID_FILE)
+    - eval $(ssh-agent -k)
+  script:
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_PRIVATE_KEY_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps
+      && chmod 700 ~/.ssh
+      && chmod 600 ~/.ssh/gitlab-vps
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_KNOWN_HOSTS_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/known_hosts
+      && chmod 600 ~/.ssh/known_hosts
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${SSH_PUBLIC_KEY_VPS}' | sed "s/- /-\n/g; s/ -/\n-/g" > ~/.ssh/gitlab-vps.pub 
+      && chmod 600 ~/.ssh/gitlab-vps.pub
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      id
+      '
+
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      (docker stop staging-db || true)
+      && (docker stop staging-server || true)
+      && (docker stop staging-api || true)
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      (docker container rm staging-db || true)
+      && (docker container rm staging-server || true)
+      && (docker container rm staging-api || true)
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${PRIVATE_REGISTRY_SERVER_PASS}' | docker login '${PRIVATE_REGISTRY_SERVER}' -u '${PRIVATE_REGISTRY_SERVER_USER}' --password-stdin
+      && docker pull '${PREFIX_IMAGE}'/staging/db:latest 
+      && docker pull '${PREFIX_IMAGE}'/staging/server:latest 
+      && docker pull '${PREFIX_IMAGE}'/staging/api:latest 
+      && docker logout '${PRIVATE_REGISTRY_SERVER_PASS}' 
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      echo '${REF_ENV_STAGING}' | tr " " "\n" > .env
+      && cat .env
+      '
+    - >
+      ssh "${VPS_USER}"@"${VPS_IP}" '
+      (docker network create staging-db-net || true)
+      && (docker network create staging-nginx-net || true)
+      && docker run -d 
+      --name staging-db 
+      --restart unless-stopped 
+      --network=staging-db-net
+      --env-file .env 
+      -v staging-data-db:/var/lib/mysql 
+      -p '${DB_PORT}':3306 
+      '${PREFIX_IMAGE}'/staging/db:latest 
+      && sleep 10
+      && docker run -d 
+      --name staging-api 
+      --restart unless-stopped 
+      --network=staging-db-net
+      -p 7000:7000 
+      -v staging-data-api:/var/www/backend-php-0823-1 
+      -v staging-data-fe:/var/www/backend-php-0823-1/ui/fe/dist
+      -v staging-data-admin:/var/www/backend-php-0823-1/ui/admin/dist
+      -w /var/www/backend-php-0823-1 
+      '${PREFIX_IMAGE}'/staging/api:latest
+      && docker network connect staging-nginx-net staging-api
+      && docker run -d
+      --name staging-server 
+      --restart unless-stopped 
+      --network=staging-nginx-net
+      -p 2096:2096 
+      -v staging-data-api:/var/www/backend-php-0823-1 
+      -v staging-data-server:/var/log/nginx 
+      -v staging-data-fe:/var/www/frontend-react-0823-1
+      -v staging-data-admin:/var/www/admin-react-0823-1
+      -w /var/www/backend-php-0823-1 
+      '${PREFIX_IMAGE}'/staging/server:latest
+      '
